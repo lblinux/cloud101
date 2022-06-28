@@ -1,0 +1,96 @@
+#!/bin/bash
+sr0_path="/dev/sr0"
+mount_path="/media/cdrom"
+yum_path="/etc/yum.repos.d"
+
+#是否存在/media/cdrom挂载目录
+[ -d $mount_path ] || mkdir -p $mount_path
+umount /dev/sr0 &> /dev/null
+if [ $? -eq 0 ]
+then
+    #判断sr0是否挂载
+    mount | grep sr0 &> /dev/null
+    if [ $? -ne 0 ]
+    then
+	mount $sr0_path $mount_path &> /dev/null
+    fi
+else
+    mount $sr0_path $mount_path &> /dev/null
+fi
+
+#进入yum仓库目录
+cd $yum_path
+
+#判断是否存在backup目录
+[ -d backup ] || mkdir $yum_path/backup
+
+#判断是否存在local.repo文件没有则创建
+if [ ! -f local.repo ]
+then
+	mv *.repo $yum_path/backup
+	cp $yum_path/backup/CentOS-Media.repo local.repo
+echo '[local]
+name=local
+baseurl=file:///media/cdrom/
+gpgcheck=0
+enabled=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7' > local.repo
+fi
+
+#清除yum缓存，重新构建缓存
+yum clean all &> /dev/null
+yum makecache fast &> /dev/null
+
+#判断bind是否安装没有则安装bind
+rpm -q bind &> /dev/null
+if [ $? -ne 0 ]
+then
+	yum -y install bind &> /dev/null
+fi
+
+read -p "请输入域名：" ym
+read -p "请输入要解析的IP：" ip
+
+#修改主配置文件
+echo 'options {
+        listen-on port 53 { '$ip'; };
+        directory       "/var/named";
+        allow-query     { 192.168.200.0/24; };
+};' > /etc/named.conf
+
+#修改区域配置文件
+echo 'zone "'$ym'" IN {
+    type master;                         
+    file "'$ym'.zheng";                
+    allow-transfer{192.168.200.0/24;}; 
+};' >> /etc/named.conf
+
+# 复制区域数据文件模板并修改
+echo '$TTL 1D              
+@       SOA     '$ym'.     admin.'$ym'. ( 
+        0     
+        3H              
+        15M             
+        1W              
+        1D              
+)
+        IN      NS      '$ym'.
+        IN      A       '$ip'
+*       IN      A       '$ip'' > /var/named/$ym.zheng
+
+#判断服务是否开启
+systemctl restart named &> /dev/null
+if [ $? -eq 0 ]
+then
+	echo "named启动成功"
+else
+	echo "启动失败"
+	exit
+fi
+
+#临时修改DNS和IP映射
+echo 'nameserver '$ip'' > /etc/resolv.conf
+echo "DNS正向解析配置成功"
+
+#测试域名解析结果
+nslookup $ym
